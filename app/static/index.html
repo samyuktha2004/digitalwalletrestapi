@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure Digital Wallet — Demo Console</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --line:#272e38; --ink:#e6edf3; --dim:#8b949e;
+    --accent:#3fb950; --danger:#f85149; --warn:#d29922; --blue:#58a6ff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:24px; background:var(--bg); color:var(--ink);
+    font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width:1100px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  .sub { color:var(--dim); font-size:13px; margin-bottom:20px; }
+  .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
+             color:var(--dim); margin:0 0 12px; font-weight:600; }
+  label { display:block; font-size:12px; color:var(--dim); margin:8px 0 4px; }
+  input {
+    width:100%; padding:8px 10px; background:#0d1117; border:1px solid var(--line);
+    border-radius:6px; color:var(--ink); font:14px var(--mono);
+  }
+  input:focus { outline:none; border-color:var(--blue); }
+  button {
+    margin-top:10px; padding:8px 14px; border:1px solid var(--line); border-radius:6px;
+    background:#21262d; color:var(--ink); font-size:13px; font-weight:500; cursor:pointer;
+  }
+  button:hover:not(:disabled) { background:#30363d; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:#238636; border-color:#2ea043; }
+  button.primary:hover:not(:disabled) { background:#2ea043; }
+  button.race { background:#8b2c1e; border-color:#b3401f; width:100%; }
+  button.race:hover:not(:disabled) { background:#a8341f; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex:1; }
+  .balance { font:600 34px/1.1 var(--mono); margin:4px 0 2px; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px;
+          font-size:11px; font-weight:600; font-family:var(--mono); }
+  .ok  { background:rgba(63,185,80,.15); color:var(--accent); }
+  .bad { background:rgba(248,81,73,.15); color:var(--danger); }
+  .neutral { background:rgba(139,148,158,.15); color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font:12px var(--mono); }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:4px 6px;
+       border-bottom:1px solid var(--line); }
+  td { padding:5px 6px; border-bottom:1px solid #1c222b; }
+  .amt-in { color:var(--accent); } .amt-out { color:var(--danger); }
+  .console {
+    background:#010409; border:1px solid var(--line); border-radius:8px; padding:12px;
+    font:12px/1.6 var(--mono); white-space:pre-wrap; word-break:break-word;
+    max-height:260px; overflow:auto; color:var(--dim);
+  }
+  .console .l-ok { color:var(--accent); } .console .l-bad { color:var(--danger); }
+  .console .l-info { color:var(--blue); } .console .l-warn { color:var(--warn); }
+  .race-pair { display:grid; gap:10px; grid-template-columns:1fr 1fr; margin-top:12px; }
+  .race-pair > div { border:1px solid var(--line); border-radius:8px; padding:10px;
+                     background:#010409; font:12px/1.5 var(--mono); }
+  .race-pair h3 { margin:0 0 6px; font-size:11px; color:var(--dim); letter-spacing:.05em; }
+  .verdict { margin-top:10px; font:13px var(--mono); }
+  .hide { display:none; }
+  .note { font-size:11px; color:var(--dim); margin-top:8px; line-height:1.5; }
+  @media (max-width:560px) { .race-pair { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Secure Digital Wallet</h1>
+  <div class="sub">FastAPI · SQLAlchemy 2.0 async · PostgreSQL row locks · AES-256-GCM payloads</div>
+
+  <div class="grid">
+    <!-- ── auth ─────────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Authentication</h2>
+      <div id="authStatus"><span class="pill neutral">signed out</span></div>
+      <div id="loginBox">
+        <label for="u">Username</label>
+        <input id="u" autocomplete="username" value="demo_user">
+        <label for="p">Password</label>
+        <input id="p" type="password" autocomplete="current-password" value="password123">
+        <div class="row">
+          <button class="primary" id="btnLogin">Log in</button>
+          <button id="btnRegister">Register</button>
+        </div>
+      </div>
+      <button id="btnLogout" class="hide">Log out</button>
+      <div class="note">JWT is stored in <code>localStorage</code> and sent as
+        <code>Authorization: Bearer …</code>.</div>
+    </div>
+
+    <!-- ── wallet ───────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Wallet</h2>
+      <div class="balance" id="balance">—</div>
+      <div class="sub" id="walletMeta">not loaded</div>
+      <button id="btnRefresh">Refresh</button>
+    </div>
+
+    <!-- ── actions ──────────────────────────────────────────── -->
+    <div class="card">
+      <h2>Deposit / Withdraw</h2>
+      <label for="depAmt">Deposit amount (₹)</label>
+      <input id="depAmt" value="1000.00">
+      <button class="primary" id="btnDeposit">Deposit</button>
+      <label for="wdAmt">Withdraw amount (₹)</label>
+      <input id="wdAmt" value="100.00">
+      <button id="btnWithdraw">Withdraw</button>
+    </div>
+
+    <!-- ── encrypted transfer ───────────────────────────────── -->
+    <div class="card">
+      <h2>Encrypted Transfer</h2>
+      <label for="toUser">Recipient username</label>
+      <input id="toUser" placeholder="recipient">
+      <label for="trAmt">Amount (₹)</label>
+      <input id="trAmt" value="50.00">
+      <button class="primary" id="btnTransfer">Encrypt &amp; Send</button>
+      <div class="note">Body is encrypted in-browser with WebCrypto AES-256-GCM and
+        posted as <code>{"payload":"&lt;iv&gt;:&lt;ciphertext&gt;"}</code>. The server
+        decrypts it in a dependency before the route handler runs.</div>
+    </div>
+  </div>
+
+  <!-- ── race condition ─────────────────────────────────────── -->
+  <div class="card" style="margin-top:16px">
+    <h2>Race Condition Simulator</h2>
+    <div class="sub" style="margin:0 0 10px">
+      Sets the balance to exactly ₹1000, then fires two ₹800 withdrawals in the same
+      tick with <code>Promise.all</code>. Pessimistic locking must let exactly one through.
+    </div>
+    <button class="race" id="btnRace">Simulate Race Condition — 2 × ₹800 withdraw</button>
+    <div class="race-pair">
+      <div><h3>REQUEST A</h3><div id="raceA">idle</div></div>
+      <div><h3>REQUEST B</h3><div id="raceB">idle</div></div>
+    </div>
+    <div class="verdict" id="verdict"></div>
+  </div>
+
+  <div class="grid" style="margin-top:16px">
+    <div class="card">
+      <h2>Recent Transactions</h2>
+      <table>
+        <thead><tr><th>Type</th><th>Amount</th><th>Status</th><th>When</th></tr></thead>
+        <tbody id="txBody"><tr><td colspan="4" style="color:var(--dim)">—</td></tr></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Status Console</h2>
+      <div class="console" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const TOKEN_KEY = "wallet_jwt";
+const money = v => "₹" + Number(v).toFixed(2);
+
+/* ── console ─────────────────────────────────────────────── */
+function log(msg, kind = "info") {
+  const line = document.createElement("div");
+  line.className = "l-" + kind;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  $("log").prepend(line);
+}
+
+/* ── auth-aware fetch ────────────────────────────────────── */
+const token = () => localStorage.getItem(TOKEN_KEY);
+
+async function api(path, { method = "GET", body } = {}) {
+  const headers = {};
+  if (token()) headers.Authorization = "Bearer " + token();
+  if (body) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { method, headers, body: body && JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { signOut(); throw new Error("session expired — log in again"); }
+  if (!res.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `HTTP ${res.status}`);
+  return data;
+}
+
+/* ── AES-256-GCM in the browser (demo key from the server) ─ */
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+let cryptoKeyPromise = null;
+
+function getCryptoKey() {
+  // Demo only. A real client never downloads the payload key.
+  cryptoKeyPromise ??= fetch("/demo/crypto-key")
+    .then(r => { if (!r.ok) throw new Error("DEMO_MODE is off — no key available"); return r.json(); })
+    .then(j => crypto.subtle.importKey("raw", unb64(j.key), "AES-GCM", false, ["encrypt"]));
+  return cryptoKeyPromise;
+}
+
+async function encryptPayload(obj) {
+  const key = await getCryptoKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(obj))
+  );
+  return `${b64(iv)}:${b64(ct)}`;
+}
+
+/* ── rendering ───────────────────────────────────────────── */
+function setAuthUI(username) {
+  const signedIn = Boolean(username);
+  $("authStatus").innerHTML = signedIn
+    ? `<span class="pill ok">signed in</span> <span style="font-family:var(--mono)">${username}</span>`
+    : `<span class="pill neutral">signed out</span>`;
+  $("loginBox").classList.toggle("hide", signedIn);
+  $("btnLogout").classList.toggle("hide", !signedIn);
+}
+
+function renderTx(rows) {
+  const body = $("txBody");
+  if (!rows.length) { body.innerHTML = `<tr><td colspan="4" style="color:var(--dim)">no transactions yet</td></tr>`; return; }
+  const inbound = t => t === "DEPOSIT" || t === "TRANSFER_IN";
+  body.innerHTML = rows.map(t => `
+    <tr>
+      <td>${t.type}</td>
+      <td class="${inbound(t.type) ? "amt-in" : "amt-out"}">${inbound(t.type) ? "+" : "−"}${money(t.amount)}</td>
+      <td><span class="pill ${t.status === "SUCCESS" ? "ok" : "bad"}">${t.status}</span></td>
+      <td>${new Date(t.created_at).toLocaleString()}</td>
+    </tr>`).join("");
+}
+
+async function refresh() {
+  if (!token()) return;
+  try {
+    const [me, wallet, txs] = await Promise.all([
+      api("/auth/me"), api("/wallet"), api("/wallet/transactions?limit=15")
+    ]);
+    setAuthUI(me.username);
+    $("balance").textContent = money(wallet.balance);
+    $("walletMeta").textContent = `wallet ${wallet.id} · updated ${new Date(wallet.updated_at).toLocaleString()}`;
+    renderTx(txs);
+  } catch (e) { log(e.message, "bad"); }
+}
+
+function signOut() {
+  localStorage.removeItem(TOKEN_KEY);
+  setAuthUI(null);
+  $("balance").textContent = "—";
+  $("walletMeta").textContent = "not loaded";
+  renderTx([]);
+}
+
+/* ── actions ─────────────────────────────────────────────── */
+async function login() {
+  const username = $("u").value.trim(), password = $("p").value;
+  const res = await fetch("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ username, password })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "login failed");
+  localStorage.setItem(TOKEN_KEY, data.access_token);
+  log(`logged in as ${username}`, "ok");
+  await refresh();
+}
+
+const guard = (btn, fn) => async () => {
+  const el = $(btn); el.disabled = true;
+  try { await fn(); } catch (e) { log(e.message, "bad"); } finally { el.disabled = false; }
+};
+
+$("btnLogin").onclick = guard("btnLogin", login);
+$("btnLogout").onclick = () => { signOut(); log("signed out", "warn"); };
+$("btnRefresh").onclick = guard("btnRefresh", refresh);
+
+$("btnRegister").onclick = guard("btnRegister", async () => {
+  await api("/auth/register", { method: "POST", body: { username: $("u").value.trim(), password: $("p").value } });
+  log("account created", "ok");
+  await login();
+});
+
+$("btnDeposit").onclick = guard("btnDeposit", async () => {
+  const w = await api("/wallet/deposit", { method: "POST", body: { amount: $("depAmt").value } });
+  log(`deposit ok → balance ${money(w.balance)}`, "ok");
+  await refresh();
+});
+
+$("btnWithdraw").onclick = guard("btnWithdraw", async () => {
+  const w = await api("/wallet/withdraw", { method: "POST", body: { amount: $("wdAmt").value } });
+  log(`withdraw ok → balance ${money(w.balance)}`, "ok");
+  await refresh();
+});
+
+$("btnTransfer").onclick = guard("btnTransfer", async () => {
+  const plaintext = { recipient_username: $("toUser").value.trim(), amount: $("trAmt").value };
+  const payload = await encryptPayload(plaintext);
+  log(`encrypted → ${payload.slice(0, 48)}…`, "info");
+  const w = await api("/wallet/transfer", { method: "POST", body: { payload } });
+  log(`transfer ok → balance ${money(w.balance)}`, "ok");
+  await refresh();
+});
+
+/* ── the race ────────────────────────────────────────────── */
+async function setBalanceTo(target) {
+  const { balance } = await api("/wallet");
+  const delta = Number(target) - Number(balance);
+  if (Math.abs(delta) < 0.005) return;
+  const path = delta > 0 ? "/wallet/deposit" : "/wallet/withdraw";
+  await api(path, { method: "POST", body: { amount: Math.abs(delta).toFixed(2) } });
+}
+
+function paintRace(el, res) {
+  const ok = res.status === 200;
+  el.innerHTML =
+    `<span class="pill ${ok ? "ok" : "bad"}">HTTP ${res.status}</span>` +
+    `<div style="margin-top:6px">${res.text}</div>` +
+    `<div style="color:var(--dim);margin-top:4px">${res.ms} ms</div>`;
+}
+
+$("btnRace").onclick = guard("btnRace", async () => {
+  $("verdict").textContent = "";
+  $("raceA").textContent = $("raceB").textContent = "in flight…";
+
+  await setBalanceTo(1000);
+  log("seeded balance to ₹1000.00 — firing 2 × ₹800 withdrawals", "warn");
+
+  const fire = async () => {
+    const t0 = performance.now();
+    const res = await fetch("/wallet/withdraw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token() },
+      body: JSON.stringify({ amount: "800.00" })
+    });
+    return { status: res.status, text: JSON.stringify(await res.json()), ms: Math.round(performance.now() - t0) };
+  };
+
+  // Both requests leave before either response lands — this is the actual race.
+  const [a, b] = await Promise.all([fire(), fire()]);
+  paintRace($("raceA"), a);
+  paintRace($("raceB"), b);
+
+  const codes = [a.status, b.status].sort();
+  const { balance } = await api("/wallet");
+  const passed = codes[0] === 200 && codes[1] === 400 && Math.abs(Number(balance) - 200) < 0.005;
+
+  $("verdict").innerHTML = passed
+    ? `<span class="pill ok">LOCKING HELD</span> one 200, one 400, final balance ${money(balance)}`
+    : `<span class="pill bad">DOUBLE SPEND</span> codes ${codes.join(" / ")}, final balance ${money(balance)}`;
+  log(passed ? `locking held — final balance ${money(balance)}` : `FAILED — balance ${money(balance)}`,
+      passed ? "ok" : "bad");
+  await refresh();
+});
+
+/* ── boot ────────────────────────────────────────────────── */
+setAuthUI(null);
+if (token()) refresh(); else log("ready — register or log in to begin", "info");
+</script>
+</body>
+</html>
