@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -6,12 +7,19 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+from app.core.middleware import request_guard
 from app.db.base import Base
 from app.db.session import engine
 from app.routers import auth, wallet
 from app.services.errors import WalletError
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Uvicorn only configures its own loggers, so the access lines from
+# app.core.middleware would be dropped at the root's default WARNING level.
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s | %(message)s"
+)
 
 
 @asynccontextmanager
@@ -27,6 +35,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Secure Digital Wallet API", version="1.0.0", lifespan=lifespan)
+
+# Runs before routing: body-size rejection and request-id tagging. Auth and
+# payload decryption are per-route and stay in app/routers/deps.py.
+app.middleware("http")(request_guard)
 
 
 @app.exception_handler(WalletError)

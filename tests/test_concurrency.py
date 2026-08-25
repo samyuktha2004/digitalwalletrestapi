@@ -33,7 +33,9 @@ async def test_concurrent_withdrawals_only_one_succeeds(client: AsyncClient) -> 
     # And the ledger agrees with the balance: one withdrawal was recorded, not two.
     txs = (await client.get("/wallet/transactions", headers=headers)).json()
     withdrawals = [t for t in txs if t["type"] == "WITHDRAWAL"]
-    assert len(withdrawals) == 1
+    # Exactly one debit committed; the loser is retained as a FAILED audit row.
+    assert [t["status"] for t in withdrawals].count("SUCCESS") == 1
+    assert [t["status"] for t in withdrawals].count("FAILED") == 1
 
 
 async def test_bidirectional_transfers_do_not_deadlock(client: AsyncClient) -> None:

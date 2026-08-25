@@ -9,6 +9,26 @@ else exists to make that testable.
 
 ---
 
+## How to Use
+
+1. Start the app using the [Quick start](#quick-start) commands below.
+2. Open the demo console at <http://localhost:8000/>.
+3. Register a new user, or log in with an existing account. Use a fresh username
+  if the account has already been created.
+4. Deposit `1000.00`, then try a withdrawal. Refresh the wallet to see the
+  balance and transaction ledger update.
+5. Register a second user in another browser window or after logging out. Log
+  back in as the first user, enter the second username and an amount, then use
+  **Encrypt & Send** to exercise the AES-256-GCM transfer flow.
+6. Use **Simulate Race Condition** to set the balance to `1000.00` and send two
+  `800.00` withdrawals simultaneously. The expected result is one successful
+  request, one insufficient-funds response, and a final balance of `200.00`.
+
+For the API-only walkthrough, open <http://localhost:8000/docs> for Swagger UI.
+The automated verification command is `pytest -q`; it covers authentication,
+validation, encrypted transfers, tamper rejection, concurrency, and deadlock
+prevention.
+
 ## Stack
 
 | Concern | Choice |
@@ -115,16 +135,32 @@ just loses money instead of overdrawing.
 Belt and braces: `CHECK (balance >= 0)` on the table, and a 5 s `lock_timeout`
 on the connection so a stuck lock fails the request instead of hanging a worker.
 
+### Refused debits are kept
+
+A rejected withdrawal or transfer writes a `FAILED` row to the ledger — repeated
+insufficient-funds attempts are exactly what an audit trail is for.
+
+The catch is that the audit row cannot ride along on the caller's transaction:
+raising rolls that back and takes the row with it. It does not need a second
+session either. Everything the refusal path did was a locked *read*, so
+`rollback()` discards no work — it just releases the locks — and the audit row
+then commits in its own fresh transaction (`_record_refusal`). One consequence
+worth knowing: rollback expires every ORM object, so the wallet id must be read
+into an argument before the rollback rather than after it.
+
+The concurrency test asserts this holds under contention — of two simultaneous
+₹800 withdrawals against ₹1000, the ledger ends with exactly one `SUCCESS` and
+exactly one `FAILED`.
+
 ---
 
 ## Payload encryption
 
 `POST /wallet/transfer` accepts only `{"payload": "<b64 iv>:<b64 ciphertext>"}`.
-A FastAPI **dependency** (not ASGI middleware) decrypts it and validates the
-plaintext into the real `TransferIn` schema before the route handler runs
-([`deps.py`](app/routers/deps.py)). A dependency rather than middleware because
-middleware would have to buffer and rewrite the body for a single route, and
-could not reuse FastAPI's validation or show a useful schema in `/docs`.
+A FastAPI **dependency** decrypts it and validates the plaintext into the real
+`TransferIn` schema before the route handler runs
+([`deps.py`](app/routers/deps.py)). See *Middleware vs. dependencies* below for
+why this one is not middleware.
 
 **GCM, not CBC.** GCM is authenticated: a tampered ciphertext fails the tag
 check and returns `400` instead of decrypting into attacker-influenced garbage.
@@ -136,6 +172,34 @@ for it.
 
 ---
 
+## Middleware vs. dependencies
+
+The two are split on one line: **does it need to run before routing?**
+
+`app/core/middleware.py` runs before a route is matched, and holds the two
+things that only work there:
+
+- **Body-size cap** — rejects a request over 64 KB with `413` *before* anything
+  reads the body. A dependency cannot do this; by the time one runs, the body
+  has already been received.
+- **Request id** — `X-Request-ID` is accepted from the caller or generated,
+  echoed on every response including errors, and tagged onto one access log line
+  per request (`rid=... POST /wallet/withdraw -> 400 (2.6ms)`). It has to exist
+  before the first log line, so it cannot come from a dependency either.
+
+The log records method, path, status and duration — never the body or the
+`Authorization` header, which is the usual way credentials end up in a log
+aggregator.
+
+Authentication and payload decryption are the opposite case and stay as
+dependencies in `app/routers/deps.py`: they are per-route, they need the request
+DB session, and as dependencies they appear in `/docs` and return proper `401`s
+through FastAPI's own machinery. Doing them as middleware would mean re-parsing
+the path to decide what to protect — how you get an endpoint accidentally left
+unauthenticated.
+
+---
+
 ## Tests
 
 ```bash
@@ -144,7 +208,7 @@ pytest -q
 ```
 
 ```
-11 passed in 4.33s
+24 passed in 11.03s
 ```
 
 **PostgreSQL is required.** There is deliberately no SQLite fallback: SQLite has
@@ -154,9 +218,22 @@ no `SELECT ... FOR UPDATE`, so the suite would pass while proving nothing.
 
 | Test | Asserts |
 |---|---|
-| `test_concurrent_withdrawals_only_one_succeeds` | seed ₹1000, two simultaneous ₹800 withdrawals via `asyncio.gather` → exactly one `200` and one `400`, final balance exactly ₹200, and exactly one `WITHDRAWAL` row in the ledger |
+| `test_concurrent_withdrawals_only_one_succeeds` | seed ₹1000, two simultaneous ₹800 withdrawals via `asyncio.gather` → exactly one `200` and one `400`, final balance exactly ₹200, and a ledger holding exactly one `SUCCESS` and one `FAILED` withdrawal |
 | `test_bidirectional_transfers_do_not_deadlock` | simultaneous A→B and B→A both succeed (lock ordering) and money is conserved |
 | `test_concurrent_deposits_do_not_lose_money` | ten simultaneous ₹10 deposits total exactly ₹100 |
+
+`tests/test_isolation.py` — *"users must not be able to access another user's
+wallet"*. No endpoint accepts a wallet id (every route derives the wallet from
+the authenticated user), so the attack surface is the token. It tests both
+halves: balances and ledgers stay scoped to their owner, and forged tokens are
+refused — wrong signing key, the `alg=none` bypass, expired, and a correctly
+signed token whose subject no longer exists. It also confirms a sender cannot be
+injected through the encrypted payload: the debited wallet always comes from the
+token.
+
+`tests/test_failed_audit.py` checks refused debits are persisted as `FAILED`
+without moving money, and that the recipient of a refused transfer gets no row
+at all. `tests/test_middleware.py` covers the `413` cap and request-id echo.
 
 `tests/test_wallet.py` covers auth, amount validation, the encrypted-transfer
 round trip, tamper rejection, wrong-key rejection, and overdraw refusal.
@@ -186,6 +263,7 @@ key exchange).
 ```
 app/
   core/      config.py  security.py (bcrypt + JWT)  crypto.py (AES-256-GCM)
+             middleware.py (body cap, request id, access log)
   db/        base.py  session.py (async engine, per-request session)
   models/    user.py  wallet.py  transaction.py
   schemas/   auth.py  wallet.py
@@ -195,6 +273,7 @@ app/
   main.py
 scripts/     encrypt_payload.py
 tests/       conftest.py  test_concurrency.py  test_wallet.py
+             test_isolation.py  test_failed_audit.py  test_middleware.py
 ```
 
 Services never import FastAPI. They raise `WalletError` subclasses carrying an
@@ -206,10 +285,6 @@ HTTP status, and `main.py` installs one handler that renders them as JSON.
 
 - **`create_all`, not migrations.** Fine for a fresh schema; add Alembic before
   the first production schema change.
-- **Failed transactions are not persisted.** The `FAILED` enum value exists, but
-  an insufficient-funds attempt rolls back its transaction, which would roll back
-  the audit row with it. Writing it needs a second, independent session — worth
-  doing for a real audit trail.
 - **No rate limiting or refresh tokens.** Access tokens are 60 min and
   non-revocable; a real deployment needs a denylist or short-lived tokens plus
   refresh.

@@ -81,14 +81,44 @@ def _log(
     tx_type: TransactionType,
     amount: Decimal,
     recipient_wallet_id: uuid.UUID | None = None,
+    status: TransactionStatus = TransactionStatus.SUCCESS,
 ) -> Transaction:
     return Transaction(
         wallet_id=wallet_id,
         type=tx_type,
         amount=amount,
         recipient_wallet_id=recipient_wallet_id,
-        status=TransactionStatus.SUCCESS,
+        status=status,
     )
+
+
+async def _record_refusal(
+    session: AsyncSession,
+    wallet_id: uuid.UUID,
+    tx_type: TransactionType,
+    amount: Decimal,
+    recipient_wallet_id: uuid.UUID | None = None,
+) -> None:
+    """Persist a FAILED row for an attempt that is about to be refused.
+
+    A rejected debit is the fraud-relevant event in a wallet — repeated
+    insufficient-funds attempts are exactly what an audit trail is for — so it
+    has to outlive the refusal that produced it.
+
+    The subtlety is that the audit row cannot ride along on the caller's
+    transaction: raising rolls that back and would take the row with it. It does
+    not need a second session either. Everything the refusal path did was a
+    locked *read*, so `rollback()` discards no work; it just releases the row
+    locks. The audit row then commits in its own fresh transaction.
+
+    Callers must read `wallet.id` into an argument *before* this runs — rollback
+    expires every ORM object, and re-reading an expired attribute would emit
+    lazy IO. Python evaluates the call arguments first, which is what makes
+    `_record_refusal(session, wallet.id, ...)` safe.
+    """
+    await session.rollback()
+    session.add(_log(wallet_id, tx_type, amount, recipient_wallet_id, TransactionStatus.FAILED))
+    await session.commit()
 
 
 async def deposit(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
@@ -104,6 +134,7 @@ async def deposit(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) ->
 async def withdraw(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
     wallet = await _lock_wallet_by_user(session, user_id)
     if wallet.balance < amount:
+        await _record_refusal(session, wallet.id, TransactionType.WITHDRAWAL, amount)
         raise InsufficientFunds()
     wallet.balance -= amount
     session.add(_log(wallet.id, TransactionType.WITHDRAWAL, amount))
@@ -130,6 +161,13 @@ async def transfer(
     recipient_wallet = locked[recipient_wallet.id]
 
     if sender_wallet.balance < amount:
+        await _record_refusal(
+            session,
+            sender_wallet.id,
+            TransactionType.TRANSFER_OUT,
+            amount,
+            recipient_wallet.id,
+        )
         raise InsufficientFunds()
 
     sender_wallet.balance -= amount
