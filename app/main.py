@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,8 +29,12 @@ async def lifespan(app: FastAPI):
     # the first time a column changes on a database that holds real rows.
     import app.models  # noqa: F401  -- register mappers before create_all
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Skipped on serverless: a cold start happens on any request, and running
+    # DDL on each one is both slow and a race between concurrent cold starts.
+    # Create the tables once instead:  CREATE_TABLES_ON_STARTUP=1 python -m app.main
+    if os.getenv("CREATE_TABLES_ON_STARTUP", "1") == "1":
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
     yield
     await engine.dispose()
 
@@ -48,11 +53,19 @@ async def wallet_error_handler(request: Request, exc: WalletError) -> JSONRespon
 
 app.include_router(auth.router)
 app.include_router(wallet.router)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Guarded because StaticFiles() raises at import time if the directory is
+# absent, which takes the whole API down. index.html is never imported, so a
+# bundler that ships only traced Python files leaves it out (this is exactly
+# what broke the first Vercel deploy). The API must outlive a missing demo page.
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
+    if not (STATIC_DIR / "index.html").is_file():
+        raise HTTPException(404, "Demo console not deployed; the API is at /docs")
     return FileResponse(STATIC_DIR / "index.html")
 
 
