@@ -1,4 +1,5 @@
 import os
+import uuid
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,6 +14,20 @@ from app.core.config import settings
 # SELECT ... FOR UPDATE needs to contend over.
 _serverless = bool(os.getenv("VERCEL"))
 
+# Supabase's transaction pooler multiplexes many clients onto a few Postgres
+# backends, so asyncpg's default sequentially-numbered prepared statement names
+# collide across requests -- DuplicatePreparedStatementError, seen in production
+# on two concurrent withdrawals. The documented fix is all three together:
+# don't cache statements, give every one a unique name, and never hold a pooled
+# connection between requests (NullPool, above).
+# All three are consumed by SQLAlchemy's asyncpg DBAPI shim out of connect_args
+# (see AsyncAdapt_asyncpg_dbapi.connect), not as create_engine() kwargs.
+_pooler_connect_args = {
+    "statement_cache_size": 0,
+    "prepared_statement_cache_size": 0,
+    "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+}
+
 engine = create_async_engine(
     settings.database_url,
     poolclass=NullPool if _serverless else None,
@@ -21,10 +36,7 @@ engine = create_async_engine(
         # A wallet that waits forever on a row lock is a hung API worker. Fail
         # the request instead; the client can retry.
         "server_settings": {"lock_timeout": "5000"},
-        # Supabase's pooler multiplexes connections, so a prepared statement
-        # cached under one backend can be replayed against another and fail
-        # ("prepared statement does not exist"). Disable asyncpg's cache there.
-        **({"statement_cache_size": 0} if _serverless else {}),
+        **(_pooler_connect_args if _serverless else {}),
     },
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
